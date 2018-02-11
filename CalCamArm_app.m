@@ -1,4 +1,4 @@
-function [ TBase, TEnd, cameraParams, TBaseStd, TEndStd, pixelErr ] = CalCamArm( imageFolder, armMat, squareSize, varargin )
+function [ TBase, TEnd, cameraParams, TBaseStd, TEndStd, pixelErr ] = CalCamArm_app( imageFolder, armMatFile, squareSize, varargin )
 %CALCAMARM Calibrates a camera to work with a robotic arm by finding the
 %camera intrinsics and the camera to arm base transformation matrix using a
 %series of arm poses and corresponding images of the arm holding a
@@ -104,6 +104,7 @@ if(exist(imageFolder,'dir') ~= 7)
     error('imageFolder must be a directory');
 end
 
+armMat = getfield(load(armMatFile), 'armMat');
 numImages = dir(imageFolder); numImages = length({numImages(~[numImages.isdir]).name});
 validateattributes(armMat, {'numeric'},{'size',[4,4,numImages]});
 armMat = double(armMat);
@@ -122,7 +123,7 @@ numBoot = 100;
 cameraParams = [];
 baseEst = eye(4);
 endEst = eye(4);
-saveImages = false;
+saveImages = true;
 savePath = 'output';
 
 %check number of inputs
@@ -186,7 +187,7 @@ if(verbose)
     fprintf('Starting Arm Calibration\n'); 
     tic;
 end
-
+mkdir(savePath);
 %convert squareEst to metres
 squareSize = squareSize / 1000;
 
@@ -286,8 +287,6 @@ if(saveImages)
     [~, projectedSolution, projectedXYZSol] = ProjectError(points,...
         cameraParams, worldPoints, armPose, inliers, solution);
 
-    mkdir(savePath)
-
     image_indecies = find(imagesUsed);
     for i = 1:size(projectedGuess,3)
        f = figure(1);
@@ -386,3 +385,6 @@ end
 if(verbose)
     fprintf('Calibration completed in %3.1f seconds with a mean error of %1.3f pixels\n',toc,pixelErr);
 end
+
+%% save
+save('calib.mat', 'TBase', 'TEnd', 'cameraParams', 'TBaseStd', 'TEndStd', 'pixelErr');
