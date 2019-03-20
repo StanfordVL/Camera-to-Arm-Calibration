@@ -177,11 +177,12 @@ def extract_board_corners(img_paths, height, width):
     inds_used = []
     points = []
     for i, fname in enumerate(img_paths):
+        print(fname)
         img = cv2.imread(fname)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # Find the chessboard corners
-        ret, corners = cv2.findChessboardCorners(gray, (height, width), None)
+        ret, corners = cv2.findChessboardCorners(gray, (height - 1, width - 1), None)
         # corners = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)   
 
         if ret == True:
@@ -189,10 +190,13 @@ def extract_board_corners(img_paths, height, width):
             inds_used.append(i)
             points.append(corners)
 
-            # Draw and display the corners
-            cv2.drawChessboardCorners(img, (height, width), corners, ret)
-            cv2.imshow('img', img)
-            cv2.waitKey(500)
+            ### TODO: put a verbose flag here, to put this in... ###
+
+    #         # Draw and display the corners
+    #         cv2.drawChessboardCorners(img, (height - 1, width - 1), corners, ret)
+    #         cv2.imshow('img', img)
+    #         cv2.waitKey(500)
+    # cv2.destroyAllWindows()
 
     return inds_used, points, img.shape, gray.shape
 
@@ -458,7 +462,6 @@ def calibrate_camera_arm(
     ### extract checkerboard patterns ###
     if verbose:
         print("Extracting checkerboards...")
-    os.mkdir(save_path)
     square_size /= 1000. # convert to meters
 
     # run a natural sort on the image paths
@@ -475,14 +478,16 @@ def calibrate_camera_arm(
     print("Found checkerboard in {} out of {} images.".format(num_imgs_used, num_images))
 
     # filter out the poses corresponding to unused images
-    arm_poses = arm_mat[:, :. inds_used]
+    arm_poses = arm_mat[:, :, inds_used]
 
     ### estimate camera intrinsics ###
 
     # checkerboard points in 3d world coordinates, assuming plane is at Z=0
     world_locs = []
-    objp = np.zeros((board_height * board_width, 3), np.float32)
-    objp[:,:2] = np.mgrid[0:board_height, 0:board_width].T.reshape(-1, 2)
+    height_to_use = board_height - 1
+    width_to_use = board_width - 1
+    objp = np.zeros((height_to_use * width_to_use, 3), np.float32)
+    objp[:,:2] = np.mgrid[0:height_to_use, 0:width_to_use].T.reshape(-1, 2)
     objp *= square_size # scale points by grid spacing
     for _ in points:
         world_locs.append(objp) 
@@ -499,22 +504,25 @@ def calibrate_camera_arm(
         # mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
 
         camera_parameters = np.array(mtx)
+        print("camera_parameters: (shape {})".format(camera_parameters.shape))
+        print(camera_parameters)
 
         # should be [k1, k2, p1, p2[, k3[, k4, k5, k6]]] 
         # the latter ones might not be returned, in which case they are 0.
-        camera_distortion = np,array(dist)
+        camera_distortion = np.array(dist)[0]
+        print("camera_distortion: (shape {})".format(camera_distortion.shape))
+        print(camera_distortion)
 
         # compute reprojection error
         mean_error = 0
-        for i in xrange(len(world_locs)):
+        for i in range(len(world_locs)):
             imgpoints2, _ = cv2.projectPoints(world_locs[i], rvecs[i], tvecs[i], mtx, dist)
-            error = cv2.norm(imgpoints[i], imgpoints2, cv2.NORM_L2)/len(imgpoints2)
+            error = cv2.norm(points[i], imgpoints2, cv2.NORM_L2)/len(imgpoints2)
             mean_error += error
         print("total reprojection error: {}".format(mean_error / len(world_locs)))
 
 
     ### run optimization to get extrinsics + checkerboard to arm transform ###
-
     if verbose:
         print("Running optimization...")
 
@@ -535,7 +543,7 @@ def calibrate_camera_arm(
 
     # generate an ideal checkerboard to compare points to
     # (should do equivalent of Matlab's generateCheckerboardPoints)
-    world_points = [[j, i] for i in range(board_height - 1) for j in range(board_width - 1)]
+    world_points = [[j, i] for i in range(height_to_use) for j in range(width_to_use)]
 
     # function to optimize: returns RMS pixel error of reprojection
     opt_func = lambda x : project_error(
@@ -582,7 +590,32 @@ def calibrate_camera_arm(
 
     ### TODO: code for saving images, bootstrapping, and saving parameters... ###
     ### https://github.com/StanfordVL/Camera-to-Arm-Calibration/blob/master/CalCamArm_app.m#L280 ###
-    
 
+    # os.mkdir(save_path)
+
+if __name__ == "__main__":
+
+    image_folder = "/Users/ajaymandlekar/Desktop/calib_data/images"
+    arm_mat = np.load("/Users/ajaymandlekar/Desktop/calib_data/poseMat.npy")
+
+    calibrate_camera_arm(
+        image_folder=image_folder, 
+        arm_mat=arm_mat, 
+        square_size=24.7, # in mm
+        board_size=(7, 10),
+        verbose=True,
+        output_transform_matrix=True,
+        max_base_offset=1,
+        max_end_offset=1,
+        inliers=80,
+        err_estimate=True,
+        num_bootstraps=100,
+        camera_parameters=None,
+        camera_distortion=None,
+        base_estimate=np.eye(4),
+        end_estimate=np.eye(4),
+        save_images=True,
+        save_path='output',
+    )
 
 
