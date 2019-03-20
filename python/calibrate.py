@@ -13,12 +13,14 @@ import glob
 import math
 import re
 import cv2
-import scipy
+import scipy.optimize
 import numpy as np
 
 from os.path import join as pjoin
 
 from pyquaternion import Quaternion
+
+EPS = np.finfo(float).eps * 4.
 
 def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
     """
@@ -53,7 +55,7 @@ def transform_to_vector(transform):
     multiplied by the angle.
     """
     vec = np.zeros(6)
-    vec[:3] = transform[:3, 4]
+    vec[:3] = transform[:3, 3]
     q = mat2quat(transform[:3, :3])
     q = convert_quat(q, to='wxyz')
     q = Quaternion(q)
@@ -67,7 +69,10 @@ def vector_to_transform(vec):
     """
     t = vec[:3]
     angle = np.linalg.norm(vec[3:])
-    axis = vec[3:] / angle
+    if angle != 0:
+        axis = vec[3:] / angle
+    else:
+        axis = vec[3:]
     q = quaternion_about_axis(angle, axis)
     return pose2mat((t, q))
 
@@ -79,9 +84,9 @@ def quaternion_about_axis(angle, axis):
     True
 
     """
-    q = numpy.array([0.0, axis[0], axis[1], axis[2]])
-    qlen = vector_norm(q)
-    if qlen > _EPS:
+    q = np.array([0.0, axis[0], axis[1], axis[2]])
+    qlen = np.linalg.norm(q)
+    if qlen > EPS:
         q *= math.sin(angle/2.0) / qlen
     q[0] = math.cos(angle/2.0)
     return convert_quat(q, to='xyzw')
@@ -140,6 +145,23 @@ def mat2quat(rmat, precise=False):
         np.negative(q, q)
     return q[[1,2,3,0]]
 
+def quat2mat(quaternion):
+    """
+    Convert given quaternion to matrix
+    :param quaternion: vec4 float angles
+    :return: 3x3 rotation matrix
+    """
+    q = np.array(quaternion, dtype=np.float32, copy=True)[[3,0,1,2]]
+    n = np.dot(q, q)
+    if n < EPS:
+        return np.identity(3)
+    q *= math.sqrt(2.0 / n)
+    q = np.outer(q, q)
+    return np.array([
+        [1.0 - q[2, 2] - q[3, 3], q[1, 2] - q[3, 0], q[1, 3] + q[2, 0]],
+        [q[1, 2] + q[3, 0], 1.0 - q[1, 1] - q[3, 3], q[2, 3] - q[1, 0]],
+        [q[1, 3] - q[2, 0], q[2, 3] + q[1, 0], 1.0 - q[1, 1] - q[2, 2]]])
+
 def pose2mat(pose):
     """
     Convert pose to homogeneous matrix
@@ -177,18 +199,17 @@ def extract_board_corners(img_paths, height, width):
     inds_used = []
     points = []
     for i, fname in enumerate(img_paths):
-        print(fname)
         img = cv2.imread(fname)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # Find the chessboard corners
         ret, corners = cv2.findChessboardCorners(gray, (height - 1, width - 1), None)
-        # corners = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)   
+        # corners = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)  
 
         if ret == True:
             # pattern found
             inds_used.append(i)
-            points.append(corners)
+            points.append(corners.squeeze())
 
             ### TODO: put a verbose flag here, to put this in... ###
 
@@ -280,7 +301,7 @@ def project_error(
     k = [camera_distortion[0], camera_distortion[1]]
     p = [camera_distortion[2], camera_distortion[3]]
     if len(camera_distortion > 4):
-        k.append(camera_distortion[5])
+        k.append(camera_distortion[4])
     else:
         k.append(0.)
     k = np.array(k)
@@ -322,7 +343,9 @@ def project_error(
         yRD = y * rad_dist
 
         # recombine and include camera intrinsics
-        projected = np.concatenate([xTD + xRD, yTD + yRD, np.ones(x.shape[0], 1)], axis=1) # shape (N + 12, 3)
+        x_comb = np.expand_dims(xTD + xRD, 1)
+        y_comb = np.expand_dims(yTD + yRD, 1)
+        projected = np.concatenate([x_comb, y_comb, np.ones((x.shape[0], 1))], axis=1) # shape (N + 12, 3)
         projected = K_cam.dot(projected.T) # shape (3, N + 12)
         projected = projected[:2, :].T # shape (N + 12, 2)
 
@@ -338,12 +361,12 @@ def project_error(
     error = error[~np.isnan(error)]
 
     # drop the largest values as outliers and take mean
-    error = sorted(error)
-    cutoff = math.floor((inliers / 100.) * error.size[0])
+    error.sort(axis=-1)
+    cutoff = math.floor((inliers / 100.) * error.shape[0])
     error = np.mean(error[:cutoff])
 
     # return RMS error in pixels
-    error = np.sqrt(err)
+    error = np.sqrt(error)
     return error, projection, proj_estimate
 
 
@@ -517,7 +540,7 @@ def calibrate_camera_arm(
         mean_error = 0
         for i in range(len(world_locs)):
             imgpoints2, _ = cv2.projectPoints(world_locs[i], rvecs[i], tvecs[i], mtx, dist)
-            error = cv2.norm(points[i], imgpoints2, cv2.NORM_L2)/len(imgpoints2)
+            error = cv2.norm(points[i], imgpoints2.squeeze(), cv2.NORM_L2)/len(imgpoints2)
             mean_error += error
         print("total reprojection error: {}".format(mean_error / len(world_locs)))
 
@@ -545,12 +568,15 @@ def calibrate_camera_arm(
     # (should do equivalent of Matlab's generateCheckerboardPoints)
     world_points = [[j, i] for i in range(height_to_use) for j in range(width_to_use)]
 
+    print("init points shape: {} {}".format(len(points), points[0].shape))
+    points=np.array(points).transpose((1, 2, 0))
+    print("new points shape: {} {}".format(len(points), points[0].shape))
     # function to optimize: returns RMS pixel error of reprojection
     opt_func = lambda x : project_error(
         points=points, 
         camera_parameters=camera_parameters, 
         camera_distortion=camera_distortion,
-        world_points=world_points,
+        world_points=np.array(world_points),
         arm_poses=arm_poses,
         inliers=inliers,
         estimated_parameters=x)[0]
@@ -595,8 +621,17 @@ def calibrate_camera_arm(
 
 if __name__ == "__main__":
 
-    image_folder = "/Users/ajaymandlekar/Desktop/calib_data/images"
-    arm_mat = np.load("/Users/ajaymandlekar/Desktop/calib_data/poseMat.npy")
+    image_folder = "./calib_data/images"
+    arm_mat = np.load("./calib_data/poseMat.npy")
+
+    # hardcoded for debugging
+    # camera_parameters = None
+    # camera_distortion = None
+    camera_parameters = np.array([
+        [636.21627486, 0., 310.36756783],
+        [0., 638.1934484, 236.25505728],
+        [0., 0., 1.]])
+    camera_distortion = np.array([0.13085502, -0.36697504, -0.00276427, -0.00270943, 0.53815114])
 
     calibrate_camera_arm(
         image_folder=image_folder, 
@@ -610,8 +645,8 @@ if __name__ == "__main__":
         inliers=80,
         err_estimate=True,
         num_bootstraps=100,
-        camera_parameters=None,
-        camera_distortion=None,
+        camera_parameters=camera_parameters,
+        camera_distortion=camera_distortion,
         base_estimate=np.eye(4),
         end_estimate=np.eye(4),
         save_images=True,
