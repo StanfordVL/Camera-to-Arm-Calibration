@@ -580,6 +580,9 @@ def calibrate_camera_arm(
         print("Check input parameters, number of images correctly processed, and try tuning the input parameters.")
 
 
+    ### TODO: code for saving images, bootstrapping, and saving parameters... ###
+    ### https://github.com/StanfordVL/Camera-to-Arm-Calibration/blob/master/CalCamArm_app.m#L280 ###
+    
 
 
 
