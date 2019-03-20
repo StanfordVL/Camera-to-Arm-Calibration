@@ -10,11 +10,15 @@ https://github.com/ZacharyTaylor/Camera-to-Arm-Calibration/blob/master/CalCamArm
 
 import os
 import glob
+import math
 import re
 import cv2
+import scipy
 import numpy as np
 
 from os.path import join as pjoin
+
+from pyquaternion import Quaternion
 
 def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
     """
@@ -22,6 +26,133 @@ def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
     """
     return [int(text) if text.isdigit() else text.lower()
             for text in _nsre.split(s)]    
+
+def convert_quat(q, to='xyzw'):
+    """
+    Converts quaternion from one convention to another. 
+    The convention to convert TO is specified as an optional argument. 
+    If to == 'xyzw', then the input is in 'wxyz' format, and vice-versa.
+
+    :param q: a 4-dim numpy array corresponding to a quaternion
+    :param to: a string, either 'xyzw' or 'wxyz', determining 
+               which convention to convert to.
+    """
+    if to == 'xyzw':
+        return q[[1, 2, 3, 0]]
+    elif to == 'wxyz':
+        return q[[3, 0, 1, 2]]
+    else:
+        raise Exception("convert_quat: choose a valid `to` argument (xyzw or wxyz)")
+
+def transform_to_vector(transform):
+    """
+    This function converts a 4x4 transform matrix to a 6D vector
+    representation where the first 3 coordinates are translation
+    and the next three correspond to the axis-angle representation
+    of the rotation with the unit vector corresponding to the axis
+    multiplied by the angle.
+    """
+    vec = np.zeros(6)
+    vec[:3] = transform[:3, 4]
+    q = mat2quat(transform[:3, :3])
+    q = convert_quat(q, to='wxyz')
+    q = Quaternion(q)
+    vec[3:] = q.angle * q.axis
+    return vec
+
+def vector_to_transform(vec):
+    """
+    This function converts a 6D representation of a transformation
+    to a 4x4 transform matrix.
+    """
+    t = vec[:3]
+    angle = np.linalg.norm(vec[3:])
+    axis = vec[3:] / angle
+    q = quaternion_about_axis(angle, axis)
+    return pose2mat((t, q))
+
+def quaternion_about_axis(angle, axis):
+    """Return quaternion for rotation about axis.
+
+    >>> q = quaternion_about_axis(0.123, [1, 0, 0])
+    >>> numpy.allclose(q, [0.99810947, 0.06146124, 0, 0])
+    True
+
+    """
+    q = numpy.array([0.0, axis[0], axis[1], axis[2]])
+    qlen = vector_norm(q)
+    if qlen > _EPS:
+        q *= math.sin(angle/2.0) / qlen
+    q[0] = math.cos(angle/2.0)
+    return convert_quat(q, to='xyzw')
+
+def mat2quat(rmat, precise=False):
+    """
+    Convert given rotation matrix to quaternion
+    :param rmat: 3x3 rotation matrix
+    :param precise: If isprecise is True,
+    the input matrix is assumed to be a precise rotation
+    matrix and a faster algorithm is used.
+    :return: vec4 float quaternion angles
+    """
+    M = np.array(rmat, dtype=np.float32, copy=False)[:3, :3]
+    if precise:
+        q = np.empty((4,))
+        t = np.trace(M)
+        if t > M[3, 3]:
+            q[0] = t
+            q[3] = M[1, 0] - M[0, 1]
+            q[2] = M[0, 2] - M[2, 0]
+            q[1] = M[2, 1] - M[1, 2]
+        else:
+            i, j, k = 0, 1, 2
+            if M[1, 1] > M[0, 0]:
+                i, j, k = 1, 2, 0
+            if M[2, 2] > M[i, i]:
+                i, j, k = 2, 0, 1
+            t = M[i, i] - (M[j, j] + M[k, k]) + M[3, 3]
+            q[i] = t
+            q[j] = M[i, j] + M[j, i]
+            q[k] = M[k, i] + M[i, k]
+            q[3] = M[k, j] - M[j, k]
+            q = q[[3, 0, 1, 2]]
+        q *= 0.5 / math.sqrt(t * M[3, 3])
+    else:
+        m00 = M[0, 0]
+        m01 = M[0, 1]
+        m02 = M[0, 2]
+        m10 = M[1, 0]
+        m11 = M[1, 1]
+        m12 = M[1, 2]
+        m20 = M[2, 0]
+        m21 = M[2, 1]
+        m22 = M[2, 2]
+        # symmetric matrix K
+        K = np.array([[m00 - m11 - m22, 0.0, 0.0, 0.0],
+                      [m01 + m10, m11 - m00 - m22, 0.0, 0.0],
+                      [m02 + m20, m12 + m21, m22 - m00 - m11, 0.0],
+                      [m21 - m12, m02 - m20, m10 - m01, m00 + m11 + m22]])
+        K /= 3.0
+        # quaternion is Eigen vector of K that corresponds to largest eigenvalue
+        w, V = np.linalg.eigh(K)
+        q = V[[3, 0, 1, 2], np.argmax(w)]
+    if q[0] < 0.0:
+        np.negative(q, q)
+    return q[[1,2,3,0]]
+
+def pose2mat(pose):
+    """
+    Convert pose to homogeneous matrix
+    :param pose: a (pos, orn) tuple where
+    pos is vec3 float cartesian, and
+    orn is vec4 float quaternion.
+    :return:
+    """
+    homo_pose_mat = np.zeros((4, 4), dtype=np.float32)
+    homo_pose_mat[:3, :3] = quat2mat(pose[1])
+    homo_pose_mat[:3, 3] = np.array(pose[0], dtype=np.float32)
+    homo_pose_mat[3, 3] = 1.
+    return homo_pose_mat
 
 ### TODO: check this function... do we need cv2.cornerSubPix? ###
 def extract_board_corners(img_paths, height, width):
@@ -65,6 +196,153 @@ def extract_board_corners(img_paths, height, width):
 
     return inds_used, points, img.shape, gray.shape
 
+def project_error(
+    points, 
+    camera_parameters, 
+    camera_distortion,
+    world_points, 
+    arm_poses, 
+    inliers, 
+    estimated_parameters):
+    """
+    Projects checkerbooards onto camera frame and finds error between projected and
+    actual position.
+
+    Args:
+        points (np.array): numpy array of shape (N, 2, M) that gives the positions
+            of the N checkerboard points in the M images
+
+        camera_parameters (np.array): camera intrinsics
+
+        camera_distortion (np.array): camera distortion parameters
+
+        world_points (np.array): numpy array of shape (N, 2) giving the world position
+            of the checkerboard points before being transformed
+
+        arm_poses (np.array): array of shape (4, 4, M) corresponding
+            to the set of base-to-arm transformation matrices per image
+
+        inliers (float): percent of data to take as
+            inliers, helps protect against a misaligned
+            board.
+
+        estimated_parameters (np.array): the estimated parameter values
+            given as a 13-dim vector. The first 6 dimensions are the
+            transform from the base to the camera, the next 6 dimensions 
+            are the transform from the end effector to the board, and the 
+            final parameter is the square size.
+
+    Returns:
+        error (float): mean projection error of the inliers in pixels
+
+        projection (np.array): array of shape (N, 2, M) of the positions of the
+            N checkerboard points in the M images
+
+        proj_estimate (np.array): array of shape (12, 2, M) of the position of
+            [base origin, basex, basey, basez,tcp origin, tcp x, tcp y, tcp z, 
+            grid x, grid y, grid z] in each image
+    """
+
+    # extract transforms from estimate
+    base_transform = vector_to_transform(estimated_parameters[:6])
+    grip_transform = vector_to_transform(estimated_parameters[6:12])
+    square_size = estimated_parameters[12]
+
+    ### TODO: wtf is going on with the line below? implementation copied from matlab ###
+
+    N = points.shape[0] # number of checkerboard points
+    M = points.shape[2] # number of images
+    assert(world_points.shape[0] == N)
+    assert(arm_poses.shape[2] == M)
+
+    # add square size to chessboard
+    # note: world_points is now shape (4, N)
+    world_points = square_size * np.array(world_points)
+    world_points = np.concatenate([world_points, 
+        np.zeros((N, 1)),
+        np.ones((N, 1))], axis=1).T
+
+    ### TODO: should this be a transpose? ###
+    K_cam = camera_parameters.T 
+    assert(K_cam.shape[0] == 3 and K_cam.shape[1] == 3)
+
+    projection = np.zeros_like(points)
+    proj_estimate = np.zeros((12, 2, M))
+
+    # organize distortion parameters
+
+    # should be [k1, k2, p1, p2[, k3[, k4, k5, k6]]] 
+    # the latter ones might not be returned, in which case they should be 0.
+    k = [camera_distortion[0], camera_distortion[1]]
+    p = [camera_distortion[2], camera_distortion[3]]
+    if len(camera_distortion > 4):
+        k.append(camera_distortion[5])
+    else:
+        k.append(0.)
+    k = np.array(k)
+    p = np.array(p)
+
+    ### TODO: I don't know what this code is doing down here, but I'm trying to keep it as close to Matlab implementation ###
+    axis_length = 0.1
+    axis = np.array([
+        [0., 0., 0., 1.],
+        [axis_length, 0., 0., 1.],
+        [0., axis_length, 0., 1.],
+        [0., 0., axis_length, 1.]
+        ])
+
+    error = np.empty((N, M))
+    error[:] = np.nan
+
+    mat_4d_to_3d = np.array([[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.]])
+
+    # loop over arm poses
+    for i in range(M):
+        # transform chessboard points from the world into the image
+        res1 = mat_4d_to_3d.dot(base_transform.dot(arm_poses[:, :, i].dot(grip_transform.dot(world_points)))).T # shape (N, 3)
+        res2 = mat_4d_to_3d.dot(base_transform.dot(axis)).T # shape (4, 3)
+        res3 = mat_4d_to_3d.dot(base_transform.dot(arm_poses[:, :, i].dot(axis))).T # shape (4, 3)
+        res4 = mat_4d_to_3d.dot(base_transform.dot(arm_poses[:, :, i].dot(grip_transform.dot(axis)))).T # shape (4, 3)
+        projected = np.concatenate([res1, res2, res3, res4], axis=0) # shape (N + 12, 3)
+        x = projected[:, 0] / projected[:, 2]
+        y = projected[:, 1] / projected[:, 2]
+        r2 = x * x + y * y
+
+        # find tangential distortion
+        xTD = 2 * p[0] * x * y + p[1] * (r2 + 2 * x * x)
+        yTD = p[0] * (r2 + 2 * y * y) + 2 * p[1] * x * y
+
+        # find radial distortion
+        rad_dist = (1. + k[0] * r2 + k[1] * r2 * r2 + k[2] * r2 * r2 * r2)
+        xRD = x * rad_dist
+        yRD = y * rad_dist
+
+        # recombine and include camera intrinsics
+        projected = np.concatenate([xTD + xRD, yTD + yRD, np.ones(x.shape[0], 1)], axis=1) # shape (N + 12, 3)
+        projected = K_cam.dot(projected.T) # shape (3, N + 12)
+        projected = projected[:2, :].T # shape (N + 12, 2)
+
+        projection[:, :, i] = projected[:-12, :] # shape (N, 2)
+        proj_estimate[:, :, i] = projected[-12:, :] # shape (12, 2)
+
+        # find error in projection
+        error[:, i] = np.sum(np.square(projection[:, :, i] - points[:, :, i]), axis=1) # shape (N,)
+
+    ### TODO: why is this NaN check necessary? ###
+
+    # remove invalid points
+    error = error[~np.isnan(error)]
+
+    # drop the largest values as outliers and take mean
+    error = sorted(error)
+    cutoff = math.floor((inliers / 100.) * error.size[0])
+    error = np.mean(error[:cutoff])
+
+    # return RMS error in pixels
+    error = np.sqrt(err)
+    return error, projection, proj_estimate
+
+
 def calibrate_camera_arm(
     image_folder, 
     arm_mat, 
@@ -78,6 +356,7 @@ def calibrate_camera_arm(
     err_estimate=True,
     num_bootstraps=100,
     camera_parameters=None,
+    camera_distortion=None,
     base_estimate=np.eye(4),
     end_estimate=np.eye(4),
     save_images=True,
@@ -134,9 +413,13 @@ def calibrate_camera_arm(
         num_bootstraps (int): number of times to bootstrap
             data, only used if err_estimate is True.
 
-        camera_parameters: if given, the calibration will 
+        camera_parameters (np.array): if given, the calibration will 
             use these camera parameters (intrinsics). Otherwise,
             they will be estimated from the data.
+
+        camera_distortion (np.array): if given, the calibration will
+            use these distortion parameters (radial, tangential). 
+            Otherwise, they will be estimated from the data.
 
         base_estimate (np.array): array of shape (4, 4) giving 
             the initial estimate for the camera to the base
@@ -196,13 +479,6 @@ def calibrate_camera_arm(
 
     ### estimate camera intrinsics ###
 
-    if verbose:
-        print("Finding Camera Parameters...")
-
-    # generate an ideal checkerboard to compare points to
-    # (should do equivalent of Matlab's generateCheckerboardPoints)
-    world_points = [[j, i] for i in range(height - 1) for j in range(width - 1)]
-
     # checkerboard points in 3d world coordinates, assuming plane is at Z=0
     world_locs = []
     objp = np.zeros((board_height * board_width, 3), np.float32)
@@ -212,7 +488,8 @@ def calibrate_camera_arm(
         world_locs.append(objp) 
 
     # estimate camera intrinsics if they have not been provided
-    if camera_parameters is None:
+    if camera_parameters is None or camera_distortion is None:
+        print("Camera Parameters not provided. Finding Camera Parameters...")
         # (should do the equivalent of Matlab's estimateCameraParameters)
         # (https://github.com/StanfordVL/Camera-to-Arm-Calibration/blob/master/CalCamArm_app.m#L236)
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(world_locs, points, gray_shape[::-1], None, None)
@@ -222,6 +499,10 @@ def calibrate_camera_arm(
         # mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
 
         camera_parameters = np.array(mtx)
+
+        # should be [k1, k2, p1, p2[, k3[, k4, k5, k6]]] 
+        # the latter ones might not be returned, in which case they are 0.
+        camera_distortion = np,array(dist)
 
         # compute reprojection error
         mean_error = 0
@@ -237,6 +518,68 @@ def calibrate_camera_arm(
     if verbose:
         print("Running optimization...")
 
-    ### TODO: convert the code onwards... (implement T2V, and convex opt and visualization) ###
-    ### https://github.com/StanfordVL/Camera-to-Arm-Calibration/blob/master/CalCamArm_app.m#L245 ###
+    ### TODO: convert the code onwards... (implement convex opt and visualization) ###
+
+    base_estimate = transform_to_vector(base_estimate)
+    end_estimate = transform_to_vector(end_estimate)
+
+    # set up search ranges
+    base_range = np.array([max_base_offset, max_base_offset, max_base_offset, np.pi, np.pi, np.pi])
+    grip_range = np.array([max_end_offset, max_end_offset, max_end_offset, np.pi, np.pi, np.pi])
+    square_range = 0.001
+    ranges = np.concatenate([base_range, grip_range, [square_range]])
+
+    initial = np.concatenate([base_estimate, end_estimate, [square_size]])
+    ub = initial + ranges
+    lb = initial - ranges
+
+    # generate an ideal checkerboard to compare points to
+    # (should do equivalent of Matlab's generateCheckerboardPoints)
+    world_points = [[j, i] for i in range(board_height - 1) for j in range(board_width - 1)]
+
+    # function to optimize: returns RMS pixel error of reprojection
+    opt_func = lambda x : project_error(
+        points=points, 
+        camera_parameters=camera_parameters, 
+        camera_distortion=camera_distortion,
+        world_points=world_points,
+        arm_poses=arm_poses,
+        inliers=inliers,
+        estimated_parameters=x)[0]
+
+    ### TODO: experiment with different methods here (cvxpy, different method argument w/o bound, etc) ###
+    
+    bounds = (
+        (lb[0], ub[0]),
+        (lb[1], ub[1]),
+        (lb[2], ub[2]),
+        (lb[3], ub[3]),
+        (lb[4], ub[4]),
+        (lb[5], ub[5]),
+        (lb[6], ub[6]),
+        (lb[7], ub[7]),
+        (lb[8], ub[8]),
+        (lb[9], ub[9]),
+        (lb[10], ub[10]),
+        (lb[11], ub[11]),
+        (lb[12], ub[12]),
+    )
+    res = scipy.optimize.minimize(opt_func,
+        x0=initial,
+        method='L-BFGS-B',
+        bounds=bounds
+    )
+
+    assert(res.success)
+    solution = res.x
+    pixel_error = res.fun
+
+    if pixel_error > 10:
+        print("WARNING: Average projection error found to be {} pixels.".format(pixel_error))
+        print("This large error is a strong indicator that something has gone wrong")
+        print("Check input parameters, number of images correctly processed, and try tuning the input parameters.")
+
+
+
+
 
