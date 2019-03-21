@@ -382,9 +382,6 @@ def project_error(
         # find error in projection
         error[:, i] = np.sum(np.square(projection[:, :, i] - points[:, :, i]), axis=1) # shape (N,)
 
-        # from IPython import embed
-        # embed()
-
     ### TODO: why is this NaN check necessary? ###
 
     # remove invalid points
@@ -397,7 +394,7 @@ def project_error(
 
     # return RMS error in pixels
     error = np.sqrt(error)
-    print(error)
+    # print(error)
     return error, projection, proj_estimate
 
 
@@ -637,9 +634,8 @@ def calibrate_camera_arm(
     # base_guess = transform_to_vector(base_guess)
     # end_guess = transform_to_vector(end_guess)
     # guess = np.concatenate([base_guess, end_guess, [square_size]])
-    # true_err = opt_func(guess)
-    # print("\n\n TRUE ERROR: {}".format(true_err))
-    # return 
+    # initial = np.array(guess)
+    # print("guess: {}".format(initial))
 
     bounds = (
         (lb[0], ub[0]),
@@ -656,16 +652,37 @@ def calibrate_camera_arm(
         (lb[11], ub[11]),
         (lb[12], ub[12]),
     )
-    res = scipy.optimize.minimize(opt_func,
-        x0=initial,
-        method='L-BFGS-B',
-        bounds=bounds,
-        options={'maxiter': 100000}
-    )
+    # res = scipy.optimize.minimize(opt_func,
+    #     x0=initial,
+    #     method='L-BFGS-B',
+    #     bounds=bounds,
+    #     # options={'maxiter': 100000}
+    # )
+    # assert(res.success)
+    # solution = res.x
+    # pixel_error = res.fun
 
-    assert(res.success)
-    solution = res.x
-    pixel_error = res.fun
+    opt_func1 = lambda x : -opt_func(x)
+    val, solution = cross_entropy_method(opt_func1, 
+        dim=13, 
+        batch_size=500, 
+        keep_size=50, 
+        num_iter=20, 
+        lb=lb, 
+        ub=ub)
+    pixel_error = opt_func(solution)
+    print(val)
+    print(pixel_error)
+
+    # res = scipy.optimize.minimize(opt_func,
+    #     x0=initial,
+    #     method='L-BFGS-B',
+    #     bounds=bounds,
+    #     # options={'maxiter': 100000}
+    # )
+    # assert(res.success)
+    # solution = res.x
+    # pixel_error = res.fun
 
     if pixel_error > 10:
         print("WARNING: Average projection error found to be {} pixels.".format(pixel_error))
@@ -833,6 +850,60 @@ def calibrate_camera_arm(
         print("Computed solutions")
         solutions_to_print = {k: solutions_to_save[k].tolist() for k in solutions_to_save}
         print(json.dumps(solutions_to_print, indent=4))
+
+# N=64, M=6, 2 iterations
+def cross_entropy_method(func, dim, batch_size, keep_size, num_iter, lb, ub):
+    """
+    Performs the Cross Entropy Method (CEM) given an evaluation function to optimize (func),
+    the input dimension of the function (dim), the number of values to sample at
+    each iteration from the current Gaussian distribution (batch_size), and the 
+    number of best candidates to use to fit the next Gaussian distribution (keep_size).
+
+    Args:
+        func (function): a function to maximize, that should map a N by D-dimensional np.array 
+            to N scalar values. 
+        dim (int): input dimension for the function
+        batch_size (int): number of candidates to sample at each iteration
+        keep_size (int): number of top candidates to use to adapt the distribution at each iteration
+        num_iter (int): number of iterations to run CEM for
+
+    Return:
+        best_value (float): the best value of the function
+    """
+
+    # initialize parameters
+    assert(lb.shape[0] == dim)
+    assert(ub.shape[0] == dim)
+    # mu = lb + (ub - lb) * np.random.rand(dim)
+    # sigma = 0.001 * np.ones_like(mu)
+
+    initial_proposals = lb + (ub - lb) * np.random.rand(batch_size, dim)
+
+    best_value = -np.inf
+    for i in range(num_iter):
+
+        if initial_proposals is None:
+            # sample a batch of candidates from current distribution
+            candidates = np.random.randn(batch_size, dim) * (sigma.reshape(1, -1)) + mu.reshape(1, -1)
+            candidates = np.clip(candidates, lb, ub)
+        else:
+            candidates = initial_proposals
+            initial_proposals = None
+
+        # evaluate the candidates, and pick the best ones
+        values = np.zeros(candidates.shape[0])
+        for c in range(candidates.shape[0]):
+            values[c] = (func(candidates[c]))
+        # values = func(candidates)
+        top_rankings = values.argsort()[-keep_size:]
+        top_candidates = candidates[top_rankings]
+        print(values[top_rankings])
+
+        # refit the Gaussian distribution around the best candidates
+        mu = top_candidates.mean(axis=0)
+        sigma = top_candidates.std(axis=0)
+
+    return values[top_rankings][-1], top_candidates[-1]
 
 if __name__ == "__main__":
 
