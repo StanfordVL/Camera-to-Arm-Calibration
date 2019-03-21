@@ -99,7 +99,6 @@ def vector_std_to_transform_std(vec, std):
     transform_std = np.std(transform_std, ddof=1, axis=2)
     return transform, transform_std
 
-
 def quaternion_about_axis(angle, axis):
     """Return quaternion for rotation about axis.
 
@@ -386,11 +385,12 @@ def project_error(
 
     # drop the largest values as outliers and take mean
     error.sort(axis=-1)
-    cutoff = math.floor((inliers / 100.) * error.shape[0])
+    cutoff = int(math.floor((inliers / 100.) * error.shape[0]))
     error = np.mean(error[:cutoff])
 
     # return RMS error in pixels
     error = np.sqrt(error)
+    # print(error)
     return error, projection, proj_estimate
 
 
@@ -593,9 +593,7 @@ def calibrate_camera_arm(
     # (should do equivalent of Matlab's generateCheckerboardPoints)
     world_points = [[j, i] for i in range(height_to_use) for j in range(width_to_use)]
 
-    print("init points shape: {} {}".format(len(points), points[0].shape))
-    points=np.array(points).transpose((1, 2, 0))
-    print("new points shape: {} {}".format(len(points), points[0].shape))
+    points = np.array(points).transpose((1, 2, 0))
 
     # function to optimize: returns RMS pixel error of reprojection
     opt_func = lambda x : project_error(
@@ -676,8 +674,8 @@ def calibrate_camera_arm(
         else:
             os.mkdir(save_path)
 
-        num_images = projection_guess.shape[2]
-        for i in range(num_images):
+        assert(projection_guess.shape[2] == num_imgs_used)
+        for i in range(num_imgs_used):
 
             # create figure
             plt.figure()
@@ -731,14 +729,14 @@ def calibrate_camera_arm(
             print("Done saving images.")
 
     # bootstrap estimates
-    assert(num_images == arm_poses.shape[2])
+    assert(num_imgs_used == arm_poses.shape[2])
     if err_estimate:
         boot_solutions = np.zeros((num_bootstraps, initial.shape[0]))
         if verbose:
             print("Running Bootstrap Opimization...")
         for i in range(num_bootstraps):
             # sample points
-            sampled_inds = np.random.choice(range(num_images), num_images)
+            sampled_inds = np.random.choice(range(num_imgs_used), num_imgs_used)
             boot_arm_poses = arm_poses[:, :, sampled_inds]
             boot_points = points[:, :, sampled_inds]
 
@@ -799,7 +797,8 @@ def calibrate_camera_arm(
 
     if verbose:
         print("Computed solutions")
-        print(json.dumps(solutions_to_save, indent=4))
+        solutions_to_print = {k: solutions_to_save[k].tolist() for k in solutions_to_save}
+        print(json.dumps(solutions_to_print, indent=4))
 
 if __name__ == "__main__":
 
@@ -826,12 +825,12 @@ if __name__ == "__main__":
         max_end_offset=1,
         inliers=80,
         err_estimate=True,
-        num_bootstraps=100,
+        num_bootstraps=10, # 100
         camera_parameters=camera_parameters,
         camera_distortion=camera_distortion,
         base_estimate=np.eye(4),
         end_estimate=np.eye(4),
-        save_images=True,
+        save_images=False, # True
         save_path='output',
     )
 
