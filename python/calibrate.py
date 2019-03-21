@@ -9,12 +9,20 @@ https://github.com/ZacharyTaylor/Camera-to-Arm-Calibration/blob/master/CalCamArm
 """
 
 import os
+import sys
+import shutil
+import json
+import time
 import glob
 import math
 import re
 import cv2
 import scipy.optimize
 import numpy as np
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 from os.path import join as pjoin
 
@@ -75,6 +83,22 @@ def vector_to_transform(vec):
         axis = vec[3:]
     q = quaternion_about_axis(angle, axis)
     return pose2mat((t, q))
+
+def vector_std_to_transform_std(vec, std):
+    """
+    This function converts a 6D representation of a transformation
+    and its standard deviation to a 4x4 transform matrix and
+    an entry-wise standard deviation 4x4 matrix.
+    """
+
+    # use 1000 samples to estimate std
+    transform = vector_to_transform(vec)
+    transform_std = np.zeros((4, 4, 1000))
+    for i in range(1000):
+        transform_std[:, :, i] = vector_to_transform(vec + std * np.random.randn(6))
+    transform_std = np.std(transform_std, ddof=1, axis=2)
+    return transform, transform_std
+
 
 def quaternion_about_axis(angle, axis):
     """Return quaternion for rotation about axis.
@@ -474,6 +498,7 @@ def calibrate_camera_arm(
 
         pixel_error: mean error of projected inliers in pixels
     """
+    start_time = time.time()
 
     # sanity check
     img_paths = [im for im in glob.glob(pjoin(image_folder, "*")) if not os.path.isdir(im)]
@@ -571,6 +596,7 @@ def calibrate_camera_arm(
     print("init points shape: {} {}".format(len(points), points[0].shape))
     points=np.array(points).transpose((1, 2, 0))
     print("new points shape: {} {}".format(len(points), points[0].shape))
+
     # function to optimize: returns RMS pixel error of reprojection
     opt_func = lambda x : project_error(
         points=points, 
@@ -617,7 +643,163 @@ def calibrate_camera_arm(
     ### TODO: code for saving images, bootstrapping, and saving parameters... ###
     ### https://github.com/StanfordVL/Camera-to-Arm-Calibration/blob/master/CalCamArm_app.m#L280 ###
 
-    # os.mkdir(save_path)
+    if save_images:
+        if verbose:
+            print("Saving images with initial guess and result...")
+
+        _, projection_guess, projected_initial = project_error(
+            points=points, 
+            camera_parameters=camera_parameters, 
+            camera_distortion=camera_distortion,
+            world_points=np.array(world_points),
+            arm_poses=arm_poses,
+            inliers=inliers,
+            estimated_parameters=initial)
+
+        _, projection_solution, projected_solution = project_error(
+            points=points, 
+            camera_parameters=camera_parameters, 
+            camera_distortion=camera_distortion,
+            world_points=np.array(world_points),
+            arm_poses=arm_poses,
+            inliers=inliers,
+            estimated_parameters=solution)
+
+        # dump images with visualization
+        if os.path.isdir(save_path):
+            if (sys.version_info > (3, 0)):
+                out = input("WARNING: will delete old contents of save location {}. Press enter to proceed".format(save_path))
+            else:
+                out = raw_input("WARNING: will delete old contents of save location {}. Press enter to proceed".format(save_path))
+            shutil.rmtree(save_path)
+            os.mkdir(save_path)
+        else:
+            os.mkdir(save_path)
+
+        num_images = projection_guess.shape[2]
+        for i in range(num_images):
+
+            # create figure
+            plt.figure()
+
+            # draw original image
+            im_path = img_paths[inds_used[i]]
+            img = cv2.imread(im_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            plt.imshow(img)
+
+            plt.scatter(points[:, 0, i], points[:, 1, i], c='r', marker='o')
+            plt.scatter(projection_guess[:, 0, i], projection_guess[:, 1, i], c='b', marker='+')
+            plt.scatter(projection_solution[:, 0, i], projection_solution[:, 1, i], c='g', marker='d')
+
+            plt.scatter(projected_initial[0, 0, i], projected_initial[0, 1, i], c='c', marker='^')
+            plt.scatter(projected_initial[4, 0, i], projected_initial[4, 1, i], c='c', marker='v')
+            plt.scatter(projected_initial[8, 0, i], projected_initial[8, 1, i], c='c', marker='<')
+
+            plt.scatter(projected_solution[0, 0, i], projected_solution[0, 1, i], c='m', marker='^')
+            plt.scatter(projected_solution[4, 0, i], projected_solution[4, 1, i], c='m', marker='v')
+            plt.scatter(projected_solution[8, 0, i], projected_solution[8, 1, i], c='m', marker='<')
+
+            color = 'rgb'
+            for j in range(2, 5):
+                for k in range(3):
+                    plt.plot(
+                        [projected_initial[4 * k, 0, i], projected_initial[4 * k + j - 1, 0, i]],
+                        [projected_initial[4 * k, 1, i], projected_initial[4 * k + j - 1, 1, i]],
+                        color[j - 2]
+                    )
+            for j in range(2, 5):
+                for k in range(3):
+                    plt.plot(
+                        [projected_solution[4 * k, 0, i], projected_solution[4 * k + j - 1, 0, i]],
+                        [projected_solution[4 * k, 1, i], projected_solution[4 * k + j - 1, 1, i]],
+                        color[j - 2]
+                    )
+            plt.legend(['detected', 'guess', 'solution', 'base initial guess', 'tcp initial guess',
+                'grid initial guess', 'base solution', 'tcp solution', 'grid solution'])
+            
+            ### TODO: convert this snippet of matlab code ###
+            #  annotation('textbox', [0,0,.10,.10], 'String',...
+            # 'Red is x, Green is y, Blue is z', 'FitBoxToText','on',...
+            # 'BackgroundColor','white','Color','red')
+            # plt.annotate()
+
+            plt.savefig(pjoin(save_path, "outputImage{}.png".format(i)))
+            plt.close()
+
+        if verbose:
+            print("Done saving images.")
+
+    # bootstrap estimates
+    assert(num_images == arm_poses.shape[2])
+    if err_estimate:
+        boot_solutions = np.zeros((num_bootstraps, initial.shape[0]))
+        if verbose:
+            print("Running Bootstrap Opimization...")
+        for i in range(num_bootstraps):
+            # sample points
+            sampled_inds = np.random.choice(range(num_images), num_images)
+            boot_arm_poses = arm_poses[:, :, sampled_inds]
+            boot_points = points[:, :, sampled_inds]
+
+            # function to optimize: returns RMS pixel error of reprojection
+            boot_func = lambda x : project_error(
+                points=boot_points, 
+                camera_parameters=camera_parameters, 
+                camera_distortion=camera_distortion,
+                world_points=np.array(world_points),
+                arm_poses=boot_arm_poses,
+                inliers=inliers,
+                estimated_parameters=x)[0]
+
+            # optimize
+            res = scipy.optimize.minimize(boot_func,
+                x0=initial,
+                method='L-BFGS-B',
+                bounds=bounds
+            )
+            assert(res.success)
+            boot_solutions[i, :] = res.x
+
+            if verbose:
+                print("Bootsrap Opt {} out of {}".format(i + 1, num_bootstraps))
+    else:
+        boot_solutions = np.zeros((1, 13))
+
+    # convert solutions to transformation matrices
+    base_transform = solution[:6]
+    base_transform_std = np.std(boot_solutions[:, :6], ddof=1, axis=0)
+    end_transform = solution[6:12]
+    end_transform_std = np.std(boot_solutions[:, 6:12], ddof=1, axis=0)
+    estimated_square_size = solution[12]
+    estimated_square_size_std = np.std(boot_solutions[:, 12], ddof=1)
+
+    if output_transform_matrix:
+        base_transform, base_transform_std = vector_std_to_transform_std(base_transform, base_transform_std)
+        end_transform, end_transform_std = vector_std_to_transform_std(end_transform, end_transform_std)
+    
+    if verbose:
+        print("Calibration completed in {} seconds with a mean error of {} pixels.".format(time.time() - start_time, pixel_error))
+
+    # save solutions
+    if not os.path.isdir(save_path):
+        os.makedir(save_path)
+
+    solutions_to_save = dict(
+        base_transform=base_transform, 
+        base_transform_std=base_transform_std,
+        end_transform=end_transform,
+        end_transform_std=end_transform_std,
+        camera_parameters=camera_parameters,
+        camera_distortion=camera_distortion,
+        pixel_error=np.array([pixel_error]),
+        estimated_square_size=np.array([estimated_square_size]),
+        estimated_square_size_std=np.array([estimated_square_size_std]))
+    np.savez(pjoin(save_path, "calib.npz"), **solutions_to_save)
+
+    if verbose:
+        print("Computed solutions")
+        print(json.dumps(solutions_to_save, indent=4))
 
 if __name__ == "__main__":
 
