@@ -240,6 +240,10 @@ def extract_board_corners(img_paths, height, width):
     #         cv2.drawChessboardCorners(img, (height - 1, width - 1), corners, ret)
     #         cv2.imshow('img', img)
     #         cv2.waitKey(500)
+
+    #         # from IPython import embed
+    #         # embed()
+
     # cv2.destroyAllWindows()
 
     return inds_used, points, img.shape, gray.shape
@@ -337,7 +341,7 @@ def project_error(
         [axis_length, 0., 0., 1.],
         [0., axis_length, 0., 1.],
         [0., 0., axis_length, 1.]
-        ])
+        ]).T
 
     error = np.empty((N, M))
     error[:] = np.nan
@@ -378,6 +382,9 @@ def project_error(
         # find error in projection
         error[:, i] = np.sum(np.square(projection[:, :, i] - points[:, :, i]), axis=1) # shape (N,)
 
+        # from IPython import embed
+        # embed()
+
     ### TODO: why is this NaN check necessary? ###
 
     # remove invalid points
@@ -390,7 +397,7 @@ def project_error(
 
     # return RMS error in pixels
     error = np.sqrt(error)
-    # print(error)
+    print(error)
     return error, projection, proj_estimate
 
 
@@ -591,8 +598,14 @@ def calibrate_camera_arm(
 
     # generate an ideal checkerboard to compare points to
     # (should do equivalent of Matlab's generateCheckerboardPoints)
-    world_points = [[j, i] for i in range(height_to_use) for j in range(width_to_use)]
 
+    # We do some funky re-ordering of the points here because the Matlab one orders the
+    # points differently from the cv2 points, and we re-order to be consistent with cv2.
+    world_points = [[j, i] for j in range(width_to_use) for i in range(height_to_use)]
+    world_points = np.array(world_points).reshape(width_to_use, height_to_use, 2)
+    world_points = world_points[:, ::-1, :].reshape(-1, 2)
+
+    # Transpose points to be consistent with what @project_error expects.
     points = np.array(points).transpose((1, 2, 0))
 
     # function to optimize: returns RMS pixel error of reprojection
@@ -600,13 +613,34 @@ def calibrate_camera_arm(
         points=points, 
         camera_parameters=camera_parameters, 
         camera_distortion=camera_distortion,
-        world_points=np.array(world_points),
+        world_points=world_points,
         arm_poses=arm_poses,
         inliers=inliers,
         estimated_parameters=x)[0]
 
     ### TODO: experiment with different methods here (cvxpy, different method argument w/o bound, etc) ###
     
+    # ### DEBUG: evaluate pixel error for different estimated params ###
+
+    # base_guess = np.array([
+    #     [0.1804, 0.9832, -0.0263, 0.0704],
+    #     [0.3707, -0.0927, -0.9241, -0.1131],
+    #     [-0.9111, 0.1570, -0.3812, 1.2731],
+    #     [0., 0., 0, 1.0000]])
+
+    # end_guess = np.array([
+    #     [-0.0356, 0.9992, -0.0154, -0.0620],
+    #     [0.9992, 0.0358, 0.0148, -0.1158],
+    #     [0.0153, -0.0149, -0.9998, 0.0843],
+    #     [0., 0., 0, 1.0000]])
+
+    # base_guess = transform_to_vector(base_guess)
+    # end_guess = transform_to_vector(end_guess)
+    # guess = np.concatenate([base_guess, end_guess, [square_size]])
+    # true_err = opt_func(guess)
+    # print("\n\n TRUE ERROR: {}".format(true_err))
+    # return 
+
     bounds = (
         (lb[0], ub[0]),
         (lb[1], ub[1]),
@@ -625,7 +659,8 @@ def calibrate_camera_arm(
     res = scipy.optimize.minimize(opt_func,
         x0=initial,
         method='L-BFGS-B',
-        bounds=bounds
+        bounds=bounds,
+        options={'maxiter': 100000}
     )
 
     assert(res.success)
@@ -636,7 +671,6 @@ def calibrate_camera_arm(
         print("WARNING: Average projection error found to be {} pixels.".format(pixel_error))
         print("This large error is a strong indicator that something has gone wrong")
         print("Check input parameters, number of images correctly processed, and try tuning the input parameters.")
-
 
     ### TODO: code for saving images, bootstrapping, and saving parameters... ###
     ### https://github.com/StanfordVL/Camera-to-Arm-Calibration/blob/master/CalCamArm_app.m#L280 ###
@@ -808,11 +842,22 @@ if __name__ == "__main__":
     # hardcoded for debugging
     # camera_parameters = None
     # camera_distortion = None
+
+    # camera_parameters = np.array([
+    #     [636.21627486, 0., 310.36756783],
+    #     [0., 638.1934484, 236.25505728],
+    #     [0., 0., 1.]])
+    # camera_distortion = np.array([0.13085502, -0.36697504, -0.00276427, -0.00270943, 0.53815114])
+
+
     camera_parameters = np.array([
-        [636.21627486, 0., 310.36756783],
-        [0., 638.1934484, 236.25505728],
-        [0., 0., 1.]])
-    camera_distortion = np.array([0.13085502, -0.36697504, -0.00276427, -0.00270943, 0.53815114])
+        [629.0841, 0., 0.],
+        [0., 631.2748, 0.],
+        [316.9163, 236.0850, 1.0000]])
+    camera_distortion = np.array([0.1399, -0.4109, -0.0049, 0.0012, 0.5507])
+
+    # k = [0.1399 -0.4109 0.5507]
+    # p = [-0.0049 0.0012]
 
     calibrate_camera_arm(
         image_folder=image_folder, 
@@ -821,10 +866,10 @@ if __name__ == "__main__":
         board_size=(7, 10),
         verbose=True,
         output_transform_matrix=True,
-        max_base_offset=1,
-        max_end_offset=1,
+        max_base_offset=2,
+        max_end_offset=2,
         inliers=80,
-        err_estimate=True,
+        err_estimate=False, # True
         num_bootstraps=10, # 100
         camera_parameters=camera_parameters,
         camera_distortion=camera_distortion,
